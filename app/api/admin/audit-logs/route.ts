@@ -7,7 +7,7 @@ export async function GET(req: NextRequest) {
   const perPage = Math.min(100, parseInt(searchParams.get("perPage") || "50"));
   const action = searchParams.get("action") || undefined;
 
-  const where = action ? { action: { contains: action } } : {};
+  const where = action ? { action: { contains: action, mode: "insensitive" as const } } : {};
 
   const [logs, total] = await Promise.all([
     prisma.auditLog.findMany({

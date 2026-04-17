@@ -93,7 +93,7 @@ jose (JWT)  ·  bcryptjs  ·  pdfkit  ·  zod
 
 ## ⚡ Quick start (5 minutes)
 
-> **Requires** Node.js 20+ and npm. Windows, macOS, Linux all fine.
+> **Requires** Node.js 20+, npm, and a Postgres database (free: [Neon](https://neon.tech) / [Supabase](https://supabase.com)).
 
 ### 1. Clone & install
 
@@ -112,14 +112,14 @@ cp .env.example .env
 Open `.env` and set at minimum:
 
 ```env
-DATABASE_URL="file:./dev.db"
+DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
 JWT_SECRET="$(openssl rand -base64 32)"
 ADMIN_EMAIL="you@example.com"
 ADMIN_PASSWORD="YourStrongPassword!"
 PAYMENT_SIMULATION_MODE="true"
 ```
 
-> 💡 For local dev leave `DATABASE_URL="file:./dev.db"` and keep `provider = "sqlite"` in `prisma/schema.prisma`. No Postgres needed yet.
+> 💡 Get a free Postgres URL in 30 seconds from [neon.tech](https://neon.tech) — pick **Create Project** and copy the connection string shown.
 
 ### 3. Set up the database
 
@@ -146,50 +146,21 @@ Open **http://localhost:3000/admin/login** — admin panel.
 
 ## 🚀 Deploy to Vercel
 
-> ⚠️ **Important:** SQLite does **not** work on Vercel (serverless FS is read-only and ephemeral). You must switch to Postgres before deploying.
-
 ### Step 1 — Create a Postgres database
 
-Pick one (all have free tiers):
+If you haven't already (see Quick Start), pick one — all have free tiers:
 
-- **[Neon](https://neon.tech)** — recommended, instant setup, great free tier
-- **[Supabase](https://supabase.com)** — includes auth/storage you don't need but fine
-- **[Vercel Postgres](https://vercel.com/storage/postgres)** — one-click from dashboard
+- **[Neon](https://neon.tech)** — recommended, instant setup
+- **[Supabase](https://supabase.com)** · **[Vercel Postgres](https://vercel.com/storage/postgres)**
 
-Copy the `DATABASE_URL` connection string.
+Copy the connection string (must end with `?sslmode=require`).
 
-### Step 2 — Switch Prisma to Postgres
-
-Edit [`prisma/schema.prisma`](prisma/schema.prisma):
-
-```prisma
-datasource db {
-  provider = "postgresql"   // ← was "sqlite"
-  url      = env("DATABASE_URL")
-}
-```
-
-Locally, point `.env` at your new Postgres URL and run:
-
-```bash
-npx prisma db push
-npm run db:seed
-```
-
-Then commit & push:
-
-```bash
-git add prisma/schema.prisma
-git commit -m "chore: switch to postgres for production"
-git push
-```
-
-### Step 3 — Import the repo into Vercel
+### Step 2 — Import the repo into Vercel
 
 1. Go to **[vercel.com/new](https://vercel.com/new)**
 2. Import `angkerith1/rithtopup-site`
 3. Framework preset: **Next.js** (auto-detected)
-4. Build command: `npm run build` (auto) — this runs `prisma generate && next build`
+4. **Build Command:** leave as default (`npm run build`). Do **not** add `prisma db push` — run schema pushes from your laptop only.
 5. **Do not deploy yet** — add environment variables first ↓
 
 ### Step 4 — Add environment variables
@@ -250,8 +221,7 @@ All variables documented in [`.env.example`](.env.example). The essential ones:
 
 ```env
 # Database
-DATABASE_URL="file:./dev.db"              # dev (sqlite)
-# DATABASE_URL="postgresql://..."         # prod
+DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
 
 # Auth
 JWT_SECRET="<32+ char random string>"

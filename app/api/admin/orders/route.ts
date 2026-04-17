@@ -12,9 +12,9 @@ export async function GET(req: NextRequest) {
   if (status && status !== "ALL") where.status = status;
   if (q) {
     where.OR = [
-      { orderNumber: { contains: q.toUpperCase() } },
-      { playerUid: { contains: q } },
-      { customerEmail: { contains: q } },
+      { orderNumber: { contains: q.toUpperCase(), mode: "insensitive" as const } },
+      { playerUid: { contains: q, mode: "insensitive" as const } },
+      { customerEmail: { contains: q, mode: "insensitive" as const } },
     ];
   }
 
