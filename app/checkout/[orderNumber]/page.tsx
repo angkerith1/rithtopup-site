@@ -17,6 +17,7 @@ import {
   AlertCircle,
   RefreshCw,
   ShieldCheck,
+  ExternalLink,
 } from "lucide-react";
 
 /* KHPay widget global */
@@ -57,6 +58,7 @@ interface OrderPayment {
 
 const TERMINAL = new Set(["DELIVERED", "FAILED", "REFUNDED", "CANCELLED"]);
 const PAID_STATES = new Set(["PAID", "PROCESSING", "DELIVERED"]);
+const KHPAY_URL_RE = /^https:\/\/khpay\.site\//i;
 
 function qrImageUrl(payload: string, size = 280): string {
   const enc = encodeURIComponent(payload);
@@ -78,6 +80,7 @@ export default function CheckoutPage() {
   const [simulating, setSimulating] = useState(false);
   const [widgetBusy, setWidgetBusy] = useState(false);
   const [widgetLoaded, setWidgetLoaded] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchOrder = useCallback(async () => {
@@ -105,9 +108,27 @@ export default function CheckoutPage() {
     fetchOrder().finally(() => setLoading(false));
   }, [fetchOrder]);
 
-  // Polling while awaiting payment
+  // ─── Auto-redirect to KHPay hosted payment page ───
   useEffect(() => {
-    if (!order) return;
+    if (
+      order &&
+      order.status === "PENDING" &&
+      order.paymentUrl &&
+      KHPAY_URL_RE.test(order.paymentUrl) &&
+      !redirecting
+    ) {
+      setRedirecting(true);
+      // Small delay so user sees "Redirecting..." before navigating away
+      const t = setTimeout(() => {
+        window.location.href = order.paymentUrl!;
+      }, 600);
+      return () => clearTimeout(t);
+    }
+  }, [order, redirecting]);
+
+  // Polling while awaiting payment (only when NOT redirecting to KHPay)
+  useEffect(() => {
+    if (!order || redirecting) return;
     if (TERMINAL.has(order.status) || PAID_STATES.has(order.status)) {
       if (pollRef.current) {
         clearInterval(pollRef.current);
@@ -132,7 +153,7 @@ export default function CheckoutPage() {
         pollRef.current = null;
       }
     };
-  }, [order, fetchOrder, router]);
+  }, [order, fetchOrder, router, redirecting]);
 
   // Countdown tick
   useEffect(() => {
@@ -179,8 +200,11 @@ export default function CheckoutPage() {
   const isPaid = order ? PAID_STATES.has(order.status) : false;
   const isSimMode = order?.paymentRef?.startsWith("SIM-") ?? false;
 
-  // ─── KHPay client-side widget fallback ───
-  const needsWidget = !order?.qrString && !isSimMode && order?.status === "PENDING";
+  // KHPay hosted page available — auto-redirect is handling it
+  const hasKhpayPage = !!(order?.paymentUrl && KHPAY_URL_RE.test(order.paymentUrl));
+
+  // ─── KHPay client-side widget fallback (when no QR and no hosted page) ───
+  const needsWidget = !order?.qrString && !isSimMode && !hasKhpayPage && order?.status === "PENDING";
   const khpayKey = order?.khpayKey ?? null;
 
   async function handleWidgetPay() {
@@ -216,7 +240,7 @@ export default function CheckoutPage() {
   return (
     <>
       <Header />
-      {/* KHPay widget SDK — loaded only when server-side QR is unavailable */}
+      {/* KHPay widget SDK — loaded only when hosted page & QR are both unavailable */}
       {needsWidget && khpayKey && (
         <Script
           src="https://khpay.site/sdk/js/widget.js"
@@ -226,14 +250,37 @@ export default function CheckoutPage() {
         />
       )}
       <main className="mx-auto max-w-3xl px-4 py-8 sm:py-12 sm:px-6">
-        {loading && (
+        {/* ── Redirecting to KHPay ── */}
+        {redirecting && (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-fox-primary/20 mb-4">
+              <ExternalLink className="h-8 w-8 text-fox-primary animate-pulse" />
+            </div>
+            <h1 className="font-display text-xl font-bold mb-2">Redirecting to Payment...</h1>
+            <p className="text-fox-muted text-sm mb-4">
+              You are being redirected to the KHPay secure payment page.
+            </p>
+            <Loader2 className="h-5 w-5 animate-spin text-fox-primary mb-4" />
+            {order?.paymentUrl && (
+              <a
+                href={order.paymentUrl}
+                className="text-xs text-fox-primary hover:underline inline-flex items-center gap-1"
+              >
+                Click here if not redirected automatically
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+          </div>
+        )}
+
+        {!redirecting && loading && (
           <div className="flex items-center justify-center py-24 text-fox-muted">
             <Loader2 className="h-6 w-6 animate-spin mr-2" />
             Loading payment...
           </div>
         )}
 
-        {!loading && error && (
+        {!redirecting && !loading && error && (
           <div className="rounded-xl border border-red-400/40 bg-red-400/10 p-6 text-center">
             <AlertCircle className="h-8 w-8 text-red-400 mx-auto mb-2" />
             <p className="text-red-300">{error}</p>
@@ -243,7 +290,7 @@ export default function CheckoutPage() {
           </div>
         )}
 
-        {!loading && order && (
+        {!redirecting && !loading && order && (
           <>
             {/* Success state */}
             {isPaid && (

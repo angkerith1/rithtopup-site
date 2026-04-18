@@ -158,6 +158,7 @@ export async function POST(req: NextRequest) {
     const envPublic = process.env.PUBLIC_APP_URL;
     const publicUrl = (isPublicHttpUrl(envPublic) ? envPublic : baseUrl).replace(/\/$/, "");
 
+    let khpayPageUrl: string | null = null;
     try {
       const init = await initiatePayment({
         orderNumber: order.orderNumber,
@@ -175,6 +176,11 @@ export async function POST(req: NextRequest) {
         },
       });
 
+      // Capture the KHPay hosted payment page URL (e.g. https://khpay.site/pay/txn_...)
+      if (init.redirectUrl && /^https:\/\/khpay\.site\//i.test(init.redirectUrl)) {
+        khpayPageUrl = init.redirectUrl;
+      }
+
       await prisma.order.update({
         where: { id: order.id },
         data: {
@@ -190,9 +196,11 @@ export async function POST(req: NextRequest) {
       console.warn("[orders] Server-side payment init failed, will use client widget:", paymentErr instanceof Error ? paymentErr.message : paymentErr);
     }
 
+    // If KHPay returned a hosted payment page, redirect there directly.
+    // Otherwise fall back to our checkout page (client-side widget).
     return NextResponse.json({
       orderNumber: order.orderNumber,
-      redirectUrl: `${baseUrl}/checkout/${order.orderNumber}`,
+      redirectUrl: khpayPageUrl || `${baseUrl}/checkout/${order.orderNumber}`,
     });
   } catch (err) {
     console.error("Order create error:", err);
