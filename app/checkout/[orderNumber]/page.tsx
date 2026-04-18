@@ -35,22 +35,6 @@ declare global {
   }
 }
 
-/* KHPay widget global */
-declare global {
-  interface Window {
-    KHPay?: {
-      init: (cfg: { key: string }) => void;
-      createPayment: (opts: {
-        amount: number;
-        currency?: string;
-        note?: string;
-        onSuccess?: (data: { transaction_id: string; [k: string]: unknown }) => void;
-        onClose?: () => void;
-      }) => void;
-    };
-  }
-}
-
 interface OrderPayment {
   orderNumber: string;
   status: string;
@@ -68,13 +52,13 @@ interface OrderPayment {
   paymentExpiresAt: string | null;
   createdAt: string;
   paidAt: string | null;
+  khpayKey: string | null;
 }
 
 const TERMINAL = new Set(["DELIVERED", "FAILED", "REFUNDED", "CANCELLED"]);
 const PAID_STATES = new Set(["PAID", "PROCESSING", "DELIVERED"]);
 
 function qrImageUrl(payload: string, size = 280): string {
-  // Render EMV QR payload via qrserver.com. High error correction + quiet zone.
   const enc = encodeURIComponent(payload);
   return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&ecc=M&margin=2&data=${enc}`;
 }
@@ -92,6 +76,8 @@ export default function CheckoutPage() {
   const [copied, setCopied] = useState<string | null>(null);
   const [remainingMs, setRemainingMs] = useState<number | null>(null);
   const [simulating, setSimulating] = useState(false);
+  const [widgetBusy, setWidgetBusy] = useState(false);
+  const [widgetLoaded, setWidgetLoaded] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchOrder = useCallback(async () => {
@@ -127,7 +113,6 @@ export default function CheckoutPage() {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
-      // If paid, bounce to /order tracker after a brief success pause
       if (PAID_STATES.has(order.status)) {
         const t = setTimeout(() => {
           router.push(`/order?number=${order.orderNumber}`);
@@ -180,8 +165,6 @@ export default function CheckoutPage() {
     if (!order || simulating) return;
     setSimulating(true);
     try {
-      // The simulate endpoint marks the order PAID and returns HTML; we only
-      // care that the DB is updated. Ignore response body.
       await fetch(
         `/api/payment/simulate?order=${encodeURIComponent(order.orderNumber)}&ref=${encodeURIComponent(order.paymentRef ?? "")}`,
         { cache: "no-store" }
@@ -196,9 +179,52 @@ export default function CheckoutPage() {
   const isPaid = order ? PAID_STATES.has(order.status) : false;
   const isSimMode = order?.paymentRef?.startsWith("SIM-") ?? false;
 
+  // ─── KHPay client-side widget fallback ───
+  const needsWidget = !order?.qrString && !isSimMode && order?.status === "PENDING";
+  const khpayKey = order?.khpayKey ?? null;
+
+  async function handleWidgetPay() {
+    if (!window.KHPay || !order || !khpayKey || widgetBusy) return;
+    setWidgetBusy(true);
+    try {
+      window.KHPay.init({ key: khpayKey });
+      window.KHPay.createPayment({
+        amount: order.amountUsd,
+        currency: "USD",
+        note: `RITHTOPUP Order ${order.orderNumber}`,
+        onSuccess: async (data) => {
+          await fetch(`/api/orders/${encodeURIComponent(order.orderNumber)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              transactionId: data.transaction_id,
+              status: "paid",
+            }),
+          });
+          await fetchOrder();
+          setWidgetBusy(false);
+        },
+        onClose: () => {
+          setWidgetBusy(false);
+        },
+      });
+    } catch {
+      setWidgetBusy(false);
+    }
+  }
+
   return (
     <>
       <Header />
+      {/* KHPay widget SDK — loaded only when server-side QR is unavailable */}
+      {needsWidget && khpayKey && (
+        <Script
+          src="https://khpay.site/sdk/js/widget.js"
+          strategy="afterInteractive"
+          onReady={() => setWidgetLoaded(true)}
+          onError={() => setWidgetLoaded(false)}
+        />
+      )}
       <main className="mx-auto max-w-3xl px-4 py-8 sm:py-12 sm:px-6">
         {loading && (
           <div className="flex items-center justify-center py-24 text-fox-muted">
@@ -274,6 +300,24 @@ export default function CheckoutPage() {
                         height={280}
                         className="block"
                       />
+                    ) : needsWidget && khpayKey ? (
+                      <div className="flex h-[280px] w-[280px] flex-col items-center justify-center text-center text-gray-500">
+                        <QrCode className="h-14 w-14 mb-3 text-fox-primary" />
+                        <p className="text-sm font-semibold text-gray-700 mb-2">
+                          Ready to pay
+                        </p>
+                        <p className="text-xs px-4 mb-4 text-gray-500">
+                          Tap the button below to open the KHQR payment screen.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={handleWidgetPay}
+                          disabled={widgetBusy || !widgetLoaded}
+                          className="rounded-xl bg-gradient-to-r from-fox-primary to-fox-accent px-6 py-2.5 text-sm font-bold text-black shadow-lg shadow-fox-primary/30 hover:shadow-xl transition-all disabled:opacity-60"
+                        >
+                          {widgetBusy ? "Opening..." : !widgetLoaded ? "Loading..." : "Pay with KHQR"}
+                        </button>
+                      </div>
                     ) : (
                       <div className="flex h-[280px] w-[280px] flex-col items-center justify-center text-center text-gray-500">
                         <QrCode className="h-16 w-16 mb-3 text-gray-400" />
@@ -318,7 +362,7 @@ export default function CheckoutPage() {
                       </div>
                       {order.amountKhr && (
                         <div className="text-sm text-fox-muted mt-0.5">
-                          ≈ {order.amountKhr.toLocaleString()} ៛
+                          \u2248 {order.amountKhr.toLocaleString()} \u17DB
                         </div>
                       )}
                     </div>
@@ -360,7 +404,7 @@ export default function CheckoutPage() {
                         disabled={simulating}
                         className="w-full rounded-xl border border-fox-accent/40 bg-fox-accent/10 text-fox-accent hover:bg-fox-accent/20 disabled:opacity-60 px-4 py-3 text-sm font-semibold transition"
                       >
-                        {simulating ? "Processing..." : "▶ Simulate Payment (dev mode)"}
+                        {simulating ? "Processing..." : "\u25B6 Simulate Payment (dev mode)"}
                       </button>
                     )}
                   </div>
