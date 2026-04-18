@@ -6,6 +6,10 @@ import { NextRequest, NextResponse } from "next/server";
 // Simulation: pretends payment succeeded and marks order PAID, then DELIVERED.
 // Only active when PAYMENT_SIMULATION_MODE=true or no real credentials set.
 export async function GET(req: NextRequest) {
+  if (process.env.PAYMENT_SIMULATION_MODE !== "true") {
+    return NextResponse.json({ error: "Simulation is disabled" }, { status: 404 });
+  }
+
   const orderNumber = req.nextUrl.searchParams.get("order");
   const ref = req.nextUrl.searchParams.get("ref");
 

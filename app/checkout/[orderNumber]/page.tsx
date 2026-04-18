@@ -244,12 +244,25 @@ export default function CheckoutPage() {
                     ) : (
                       <div className="flex h-[280px] w-[280px] flex-col items-center justify-center text-center text-gray-500">
                         <QrCode className="h-16 w-16 mb-3 text-gray-400" />
-                        <p className="text-sm font-semibold text-gray-700">
-                          Simulation Mode
-                        </p>
-                        <p className="text-xs px-4 mt-1">
-                          No live KHQR. Click the button below to simulate a payment.
-                        </p>
+                        {isSimMode ? (
+                          <>
+                            <p className="text-sm font-semibold text-gray-700">
+                              Simulation Mode
+                            </p>
+                            <p className="text-xs px-4 mt-1">
+                              No live KHQR. Click the button below to simulate a payment.
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm font-semibold text-gray-700">
+                              KHQR unavailable
+                            </p>
+                            <p className="text-xs px-4 mt-1">
+                              Please try again in a moment or create a new order.
+                            </p>
+                          </>
+                        )}
                       </div>
                     )}
                     <div className="mt-3 text-center">

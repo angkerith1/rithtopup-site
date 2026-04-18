@@ -26,12 +26,15 @@ export interface PaymentInitResult {
 
 const KHPAY_BASE = process.env.KHPAY_BASE_URL || "https://khpay.site/api/v1";
 const KHPAY_KEY = process.env.KHPAY_API_KEY || "";
-const SIM_MODE = process.env.PAYMENT_SIMULATION_MODE === "true" || !KHPAY_KEY;
+const SIM_MODE = process.env.PAYMENT_SIMULATION_MODE === "true";
 
 export async function initiatePayment(
   args: InitiatePaymentArgs
 ): Promise<PaymentInitResult> {
   if (SIM_MODE) return simulatePayment(args);
+  if (!KHPAY_KEY) {
+    throw new Error("KHPAY_API_KEY is not configured");
+  }
   if (args.method === "KHPAY") return initiateKhpay(args);
   throw new Error(`Unsupported payment method: ${args.method}`);
 }
