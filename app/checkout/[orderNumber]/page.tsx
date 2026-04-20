@@ -2,12 +2,10 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
-import Script from "next/script";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { useCurrency } from "@/lib/currency";
 import {
-  QrCode,
   Clock,
   CheckCircle2,
   Copy,
@@ -19,22 +17,6 @@ import {
   ShieldCheck,
   ExternalLink,
 } from "lucide-react";
-
-/* KHPay widget global */
-declare global {
-  interface Window {
-    KHPay?: {
-      init: (cfg: { key: string }) => void;
-      createPayment: (opts: {
-        amount: number;
-        currency?: string;
-        note?: string;
-        onSuccess?: (data: { transaction_id: string; [k: string]: unknown }) => void;
-        onClose?: () => void;
-      }) => void;
-    };
-  }
-}
 
 interface OrderPayment {
   orderNumber: string;
@@ -60,11 +42,6 @@ const TERMINAL = new Set(["DELIVERED", "FAILED", "REFUNDED", "CANCELLED"]);
 const PAID_STATES = new Set(["PAID", "PROCESSING", "DELIVERED"]);
 const KHPAY_URL_RE = /^https:\/\/khpay\.site\//i;
 
-function qrImageUrl(payload: string, size = 280): string {
-  const enc = encodeURIComponent(payload);
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&ecc=M&margin=2&data=${enc}`;
-}
-
 export default function CheckoutPage() {
   const params = useParams<{ orderNumber: string }>();
   const router = useRouter();
@@ -78,10 +55,10 @@ export default function CheckoutPage() {
   const [copied, setCopied] = useState<string | null>(null);
   const [remainingMs, setRemainingMs] = useState<number | null>(null);
   const [simulating, setSimulating] = useState(false);
-  const [widgetBusy, setWidgetBusy] = useState(false);
-  const [widgetLoaded, setWidgetLoaded] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
+  const [creatingTxn, setCreatingTxn] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const txnCreatedRef = useRef(false);
 
   const fetchOrder = useCallback(async () => {
     try {
@@ -108,7 +85,7 @@ export default function CheckoutPage() {
     fetchOrder().finally(() => setLoading(false));
   }, [fetchOrder]);
 
-  // ─── Auto-redirect to KHPay hosted payment page ───
+  // ─── Auto-redirect if order already has a KHPay payment URL ───
   useEffect(() => {
     if (
       order &&
@@ -118,17 +95,83 @@ export default function CheckoutPage() {
       !redirecting
     ) {
       setRedirecting(true);
-      // Small delay so user sees "Redirecting..." before navigating away
       const t = setTimeout(() => {
         window.location.href = order.paymentUrl!;
-      }, 600);
+      }, 400);
       return () => clearTimeout(t);
     }
   }, [order, redirecting]);
 
-  // Polling while awaiting payment (only when NOT redirecting to KHPay)
+  // ─── Client-side KHPay transaction creation ───
+  // When server-side failed (Cloudflare), create transaction from the browser
   useEffect(() => {
-    if (!order || redirecting) return;
+    if (
+      !order ||
+      order.status !== "PENDING" ||
+      redirecting ||
+      creatingTxn ||
+      txnCreatedRef.current
+    ) return;
+
+    // Already has a KHPay URL or QR — no need to create client-side
+    if (order.paymentUrl && KHPAY_URL_RE.test(order.paymentUrl)) return;
+    if (order.qrString) return;
+    if (order.paymentRef?.startsWith("SIM-")) return;
+
+    const khpayKey = order.khpayKey;
+    if (!khpayKey) return;
+
+    txnCreatedRef.current = true;
+    setCreatingTxn(true);
+
+    (async () => {
+      try {
+        const origin = window.location.origin;
+        const res = await fetch("https://khpay.site/api/v1/qr/generate", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${khpayKey}`,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+          },
+          body: JSON.stringify({
+            amount: order.amountUsd.toFixed(2),
+            currency: "USD",
+            note: `RITHTOPUP Order ${order.orderNumber}`,
+            success_url: `${origin}/order?number=${order.orderNumber}`,
+            cancel_url: `${origin}/games/${order.gameSlug}`,
+          }),
+        });
+
+        const json = await res.json();
+        if (json.success && json.data?.payment_url) {
+          // Save transaction info to our order
+          await fetch(`/api/orders/${encodeURIComponent(order.orderNumber)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              transactionId: json.data.transaction_id,
+              paymentUrl: json.data.payment_url,
+            }),
+          });
+
+          // Redirect to KHPay hosted payment page
+          setRedirecting(true);
+          window.location.href = json.data.payment_url;
+        } else {
+          console.error("[khpay] Client-side create failed:", json);
+          setCreatingTxn(false);
+        }
+      } catch (err) {
+        console.error("[khpay] Client-side create error:", err);
+        setCreatingTxn(false);
+      }
+    })();
+  }, [order, redirecting, creatingTxn]);
+
+  // Polling while awaiting payment
+  useEffect(() => {
+    if (!order || redirecting || creatingTxn) return;
     if (TERMINAL.has(order.status) || PAID_STATES.has(order.status)) {
       if (pollRef.current) {
         clearInterval(pollRef.current);
@@ -153,7 +196,7 @@ export default function CheckoutPage() {
         pollRef.current = null;
       }
     };
-  }, [order, fetchOrder, router, redirecting]);
+  }, [order, fetchOrder, router, redirecting, creatingTxn]);
 
   // Countdown tick
   useEffect(() => {
@@ -162,7 +205,6 @@ export default function CheckoutPage() {
       return;
     }
     const expiry = new Date(order.paymentExpiresAt).getTime();
-
     const tick = () => {
       const ms = expiry - Date.now();
       setRemainingMs(ms > 0 ? ms : 0);
@@ -177,9 +219,7 @@ export default function CheckoutPage() {
       await navigator.clipboard.writeText(text);
       setCopied(label);
       setTimeout(() => setCopied(null), 1500);
-    } catch {
-      /* clipboard may be unavailable */
-    }
+    } catch { /* */ }
   }
 
   async function handleSimulate() {
@@ -200,87 +240,36 @@ export default function CheckoutPage() {
   const isPaid = order ? PAID_STATES.has(order.status) : false;
   const isSimMode = order?.paymentRef?.startsWith("SIM-") ?? false;
 
-  // KHPay hosted page available — auto-redirect is handling it
-  const hasKhpayPage = !!(order?.paymentUrl && KHPAY_URL_RE.test(order.paymentUrl));
-
-  // ─── KHPay client-side widget fallback (when no QR and no hosted page) ───
-  const needsWidget = !order?.qrString && !isSimMode && !hasKhpayPage && order?.status === "PENDING";
-  const khpayKey = order?.khpayKey ?? null;
-
-  async function handleWidgetPay() {
-    if (!window.KHPay || !order || !khpayKey || widgetBusy) return;
-    setWidgetBusy(true);
-    try {
-      window.KHPay.init({ key: khpayKey });
-      window.KHPay.createPayment({
-        amount: order.amountUsd,
-        currency: "USD",
-        note: `RITHTOPUP Order ${order.orderNumber}`,
-        onSuccess: async (data) => {
-          await fetch(`/api/orders/${encodeURIComponent(order.orderNumber)}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              transactionId: data.transaction_id,
-              status: "paid",
-            }),
-          });
-          await fetchOrder();
-          setWidgetBusy(false);
-        },
-        onClose: () => {
-          setWidgetBusy(false);
-        },
-      });
-    } catch {
-      setWidgetBusy(false);
-    }
-  }
-
   return (
     <>
       <Header />
-      {/* KHPay widget SDK — loaded only when hosted page & QR are both unavailable */}
-      {needsWidget && khpayKey && (
-        <Script
-          src="https://khpay.site/sdk/js/widget.js"
-          strategy="afterInteractive"
-          onReady={() => setWidgetLoaded(true)}
-          onError={() => setWidgetLoaded(false)}
-        />
-      )}
       <main className="mx-auto max-w-3xl px-4 py-8 sm:py-12 sm:px-6">
-        {/* ── Redirecting to KHPay ── */}
-        {redirecting && (
+        {/* ── Redirecting / Creating txn ── */}
+        {(redirecting || creatingTxn) && (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-fox-primary/20 mb-4">
               <ExternalLink className="h-8 w-8 text-fox-primary animate-pulse" />
             </div>
-            <h1 className="font-display text-xl font-bold mb-2">Redirecting to Payment...</h1>
+            <h1 className="font-display text-xl font-bold mb-2">
+              {redirecting ? "Redirecting to Payment..." : "Preparing Payment..."}
+            </h1>
             <p className="text-fox-muted text-sm mb-4">
-              You are being redirected to the KHPay secure payment page.
+              {redirecting
+                ? "Opening KHPay secure payment page."
+                : "Setting up your payment, please wait..."}
             </p>
-            <Loader2 className="h-5 w-5 animate-spin text-fox-primary mb-4" />
-            {order?.paymentUrl && (
-              <a
-                href={order.paymentUrl}
-                className="text-xs text-fox-primary hover:underline inline-flex items-center gap-1"
-              >
-                Click here if not redirected automatically
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            )}
+            <Loader2 className="h-5 w-5 animate-spin text-fox-primary" />
           </div>
         )}
 
-        {!redirecting && loading && (
+        {!redirecting && !creatingTxn && loading && (
           <div className="flex items-center justify-center py-24 text-fox-muted">
             <Loader2 className="h-6 w-6 animate-spin mr-2" />
             Loading payment...
           </div>
         )}
 
-        {!redirecting && !loading && error && (
+        {!redirecting && !creatingTxn && !loading && error && (
           <div className="rounded-xl border border-red-400/40 bg-red-400/10 p-6 text-center">
             <AlertCircle className="h-8 w-8 text-red-400 mx-auto mb-2" />
             <p className="text-red-300">{error}</p>
@@ -290,7 +279,7 @@ export default function CheckoutPage() {
           </div>
         )}
 
-        {!redirecting && !loading && order && (
+        {!redirecting && !creatingTxn && !loading && order && (
           <>
             {/* Success state */}
             {isPaid && (
@@ -302,9 +291,7 @@ export default function CheckoutPage() {
                 <p className="text-fox-muted text-sm mb-1">
                   Order <span className="font-mono text-fox-text">{order.orderNumber}</span>
                 </p>
-                <p className="text-fox-muted text-sm">
-                  Redirecting you to order tracker...
-                </p>
+                <p className="text-fox-muted text-sm">Redirecting you to order tracker...</p>
                 <Loader2 className="h-4 w-4 animate-spin mx-auto mt-4 text-fox-muted" />
               </div>
             )}
@@ -323,68 +310,52 @@ export default function CheckoutPage() {
               </div>
             )}
 
-            {/* Active payment state */}
+            {/* Active payment — fallback when client KHPay call failed */}
             {!isPaid && !isExpired && (
               <div className="space-y-6">
-                {/* Header */}
                 <div className="text-center">
                   <h1 className="font-display text-2xl sm:text-3xl font-bold mb-1">
-                    Scan to Pay
+                    Complete Your Payment
                   </h1>
                   <p className="text-fox-muted text-sm">
-                    Use any KHQR-compatible app: ABA Pay, ACLEDA, Wing, TrueMoney, Prince Bank, Chip Mong...
+                    Use any KHQR-compatible app: ABA Pay, ACLEDA, Wing, TrueMoney, Prince Bank...
                   </p>
                 </div>
 
                 <div className="grid md:grid-cols-[auto_1fr] gap-6 items-start">
-                  {/* QR panel */}
+                  {/* QR / redirect panel */}
                   <div className="mx-auto rounded-2xl border-2 border-fox-primary/30 bg-white p-4 shadow-xl shadow-fox-primary/20">
                     {order.qrString ? (
                       <img
-                        src={qrImageUrl(order.qrString)}
+                        src={`https://api.qrserver.com/v1/create-qr-code/?size=280x280&ecc=M&margin=2&data=${encodeURIComponent(order.qrString)}`}
                         alt="KHQR code"
                         width={280}
                         height={280}
                         className="block"
                       />
-                    ) : needsWidget && khpayKey ? (
-                      <div className="flex h-[280px] w-[280px] flex-col items-center justify-center text-center text-gray-500">
-                        <QrCode className="h-14 w-14 mb-3 text-fox-primary" />
-                        <p className="text-sm font-semibold text-gray-700 mb-2">
-                          Ready to pay
-                        </p>
-                        <p className="text-xs px-4 mb-4 text-gray-500">
-                          Tap the button below to open the KHQR payment screen.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={handleWidgetPay}
-                          disabled={widgetBusy || !widgetLoaded}
-                          className="rounded-xl bg-gradient-to-r from-fox-primary to-fox-accent px-6 py-2.5 text-sm font-bold text-black shadow-lg shadow-fox-primary/30 hover:shadow-xl transition-all disabled:opacity-60"
-                        >
-                          {widgetBusy ? "Opening..." : !widgetLoaded ? "Loading..." : "Pay with KHQR"}
-                        </button>
-                      </div>
                     ) : (
                       <div className="flex h-[280px] w-[280px] flex-col items-center justify-center text-center text-gray-500">
-                        <QrCode className="h-16 w-16 mb-3 text-gray-400" />
                         {isSimMode ? (
                           <>
-                            <p className="text-sm font-semibold text-gray-700">
-                              Simulation Mode
-                            </p>
-                            <p className="text-xs px-4 mt-1">
-                              No live KHQR. Click the button below to simulate a payment.
-                            </p>
+                            <Smartphone className="h-14 w-14 mb-3 text-gray-400" />
+                            <p className="text-sm font-semibold text-gray-700">Simulation Mode</p>
+                            <p className="text-xs px-4 mt-1">Click the button below to simulate payment.</p>
                           </>
                         ) : (
                           <>
+                            <AlertCircle className="h-14 w-14 mb-3 text-yellow-500" />
                             <p className="text-sm font-semibold text-gray-700">
-                              KHQR unavailable
+                              Could not connect to payment provider
                             </p>
-                            <p className="text-xs px-4 mt-1">
-                              Please try again in a moment or create a new order.
+                            <p className="text-xs px-4 mt-2 text-gray-500">
+                              Please try creating a new order. If this persists, contact support.
                             </p>
+                            <a
+                              href={`/games/${order.gameSlug}`}
+                              className="mt-3 rounded-lg bg-fox-primary px-4 py-2 text-xs font-bold text-black"
+                            >
+                              Try Again
+                            </a>
                           </>
                         )}
                       </div>
@@ -399,11 +370,8 @@ export default function CheckoutPage() {
 
                   {/* Details panel */}
                   <div className="space-y-4">
-                    {/* Amount */}
                     <div className="rounded-xl border border-fox-border bg-fox-card p-4">
-                      <div className="text-[10px] uppercase tracking-widest text-fox-muted mb-1">
-                        Amount due
-                      </div>
+                      <div className="text-[10px] uppercase tracking-widest text-fox-muted mb-1">Amount due</div>
                       <div className="font-display text-3xl font-bold text-fox-primary">
                         {format(order.amountUsd)}
                       </div>
@@ -414,7 +382,6 @@ export default function CheckoutPage() {
                       )}
                     </div>
 
-                    {/* Countdown */}
                     {remainingMs !== null && (
                       <div className="rounded-xl border border-yellow-400/30 bg-yellow-400/5 p-4">
                         <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-yellow-400/90 mb-1">
@@ -427,7 +394,6 @@ export default function CheckoutPage() {
                       </div>
                     )}
 
-                    {/* Live status */}
                     <div className="rounded-xl border border-fox-border bg-fox-card p-4">
                       <div className="flex items-center gap-2 text-sm">
                         <Loader2 className="h-4 w-4 animate-spin text-fox-primary" />
@@ -443,7 +409,6 @@ export default function CheckoutPage() {
                       </button>
                     </div>
 
-                    {/* Simulate button (dev only) */}
                     {isSimMode && (
                       <button
                         type="button"
@@ -459,48 +424,21 @@ export default function CheckoutPage() {
 
                 {/* Order summary */}
                 <div className="rounded-xl border border-fox-border bg-fox-card p-4">
-                  <div className="text-[10px] uppercase tracking-widest text-fox-muted mb-3">
-                    Order details
-                  </div>
+                  <div className="text-[10px] uppercase tracking-widest text-fox-muted mb-3">Order details</div>
                   <div className="space-y-2 text-sm">
                     <Row label="Order #">
-                      <button
-                        type="button"
-                        onClick={() => copy(order.orderNumber, "order")}
-                        className="inline-flex items-center gap-1.5 font-mono hover:text-fox-primary"
-                      >
+                      <button type="button" onClick={() => copy(order.orderNumber, "order")}
+                        className="inline-flex items-center gap-1.5 font-mono hover:text-fox-primary">
                         {order.orderNumber}
-                        {copied === "order" ? (
-                          <Check className="h-3 w-3 text-green-400" />
-                        ) : (
-                          <Copy className="h-3 w-3 text-fox-muted" />
-                        )}
+                        {copied === "order" ? <Check className="h-3 w-3 text-green-400" /> : <Copy className="h-3 w-3 text-fox-muted" />}
                       </button>
                     </Row>
                     <Row label="Game">{order.gameName}</Row>
                     <Row label="Package">{order.productName}</Row>
                     <Row label="Player UID">
                       <span className="font-mono">{order.playerUid}</span>
-                      {order.serverId && (
-                        <span className="text-fox-muted"> ({order.serverId})</span>
-                      )}
+                      {order.serverId && <span className="text-fox-muted"> ({order.serverId})</span>}
                     </Row>
-                  </div>
-                </div>
-
-                {/* Instructions */}
-                <div className="rounded-xl border border-fox-border/60 bg-fox-bg/50 p-4">
-                  <div className="flex items-start gap-3">
-                    <Smartphone className="h-5 w-5 text-fox-primary mt-0.5 shrink-0" />
-                    <div className="text-sm text-fox-muted space-y-1">
-                      <p className="font-semibold text-fox-text">How to pay:</p>
-                      <ol className="list-decimal list-inside space-y-0.5 text-xs">
-                        <li>Open your banking app (ABA, ACLEDA, Wing, etc.)</li>
-                        <li>Tap &quot;Scan KHQR&quot; and scan the code above</li>
-                        <li>Confirm the amount and complete the payment</li>
-                        <li>This page updates automatically when payment is received</li>
-                      </ol>
-                    </div>
                   </div>
                 </div>
               </div>

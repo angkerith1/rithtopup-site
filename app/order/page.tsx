@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { Search, Package, CheckCircle2, XCircle, Truck, CreditCard, Send, FileText } from "lucide-react";
@@ -45,6 +46,7 @@ const STATUS_META: Record<string, { label: string; color: string; desc: string }
 };
 
 export default function OrderPage() {
+  const searchParams = useSearchParams();
   const [orderNumber, setOrderNumber] = useState("");
   const [order, setOrder] = useState<OrderInfo | null>(null);
   const [loading, setLoading] = useState(false);
@@ -80,6 +82,34 @@ export default function OrderPage() {
   );
 
   useEffect(() => stopPolling, [stopPolling]);
+
+  // Auto-lookup when returning from KHPay payment with ?number=RT-XXXX
+  useEffect(() => {
+    const num = searchParams?.get("number");
+    if (num && !order && !loading) {
+      const upperNum = num.trim().toUpperCase();
+      setOrderNumber(upperNum);
+      setLoading(true);
+      setError(null);
+      (async () => {
+        try {
+          const res = await fetch(`/api/orders/${encodeURIComponent(upperNum)}`);
+          if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            throw new Error(d.error || "Order not found");
+          }
+          const data: OrderInfo = await res.json();
+          setOrder(data);
+          if (!TERMINAL_STATUSES.has(data.status)) startPolling(data.orderNumber);
+        } catch (err: any) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function lookup(e: React.FormEvent) {
     e.preventDefault();

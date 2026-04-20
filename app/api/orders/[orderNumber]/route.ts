@@ -83,6 +83,7 @@ export async function GET(
 // ─── PATCH: save widget payment result ────────────────────────────────
 const patchSchema = z.object({
   transactionId: z.string().min(1).max(100),
+  paymentUrl: z.string().url().max(500).optional(),
   status: z.enum(["paid"]).optional(),
 });
 
@@ -112,8 +113,11 @@ export async function PATCH(
       paymentRef: parsed.data.transactionId,
       paymentExpiresAt: new Date(Date.now() + 180 * 1000),
     };
+    if (parsed.data.paymentUrl) {
+      data.paymentUrl = parsed.data.paymentUrl;
+    }
 
-    // Widget confirmed payment → mark PAID
+    // Client confirmed payment → mark PAID
     if (parsed.data.status === "paid") {
       data.status = "PAID";
       data.paidAt = new Date();
